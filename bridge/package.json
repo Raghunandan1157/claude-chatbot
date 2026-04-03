@@ -1,0 +1,12 @@
+{
+  "name": "claude-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between Supabase and Claude CLI",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2"
+  }
+}

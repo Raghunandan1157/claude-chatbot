@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# bridge
+bridge/node_modules/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
