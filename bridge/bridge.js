@@ -1,5 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
-const Anthropic = require("@anthropic-ai/sdk");
+const { exec } = require("child_process");
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -8,8 +8,9 @@ const SUPABASE_KEY =
   process.env.SUPABASE_KEY ||
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtuYmlqc25naGpjYW9jd3RqdnZ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxMjM3MzgsImV4cCI6MjA5MDY5OTczOH0.k7wem_YuGJ9wHavFBbg00W-d1S9Q0eXmCWdtPWMIFZs";
 
+const CLAUDE_PATH = "/Users/raghunandanmali/.local/bin/claude";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const anthropic = new Anthropic();
 
 let isProcessing = false;
 const messageQueue = [];
@@ -29,15 +30,21 @@ async function sendHeartbeat() {
     .eq("id", 1);
 }
 
-async function callClaude(message, model) {
-  const response = await anthropic.messages.create({
-    model: model || "claude-haiku-4-5-20251001",
-    max_tokens: 4096,
-    system: "You are a helpful, friendly personal assistant. Be concise and conversational.",
-    messages: [{ role: "user", content: message }],
-  });
+function callClaude(message, model) {
+  return new Promise((resolve, reject) => {
+    // Escape single quotes in the message for shell safety
+    const escaped = message.replace(/'/g, "'\\''");
+    const modelFlag = model ? `--model ${model}` : "";
+    const cmd = `${CLAUDE_PATH} -p ${modelFlag} '${escaped}'`;
 
-  return response.content[0].text;
+    exec(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(stderr || err.message));
+      } else {
+        resolve(stdout.trim());
+      }
+    });
+  });
 }
 
 async function processMessage(message) {
@@ -87,13 +94,7 @@ async function processQueue() {
 
 async function start() {
   console.log("Starting bridge...");
-
-  // Verify API key is available
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("ERROR: ANTHROPIC_API_KEY environment variable is not set.");
-    console.error("Set it with: export ANTHROPIC_API_KEY=your-key-here");
-    process.exit(1);
-  }
+  console.log(`Using Claude CLI at: ${CLAUDE_PATH}`);
 
   await setOnline(true);
 
