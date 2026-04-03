@@ -1,13 +1,12 @@
 {
-  "name": "claude-bridge",
+  "name": "memory-bridge",
   "version": "1.0.0",
-  "description": "Bridge between Supabase and Claude CLI",
+  "description": "Syncs memory entries from Supabase to Obsidian",
   "main": "bridge.js",
   "scripts": {
     "start": "node bridge.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.82.0",
     "@supabase/supabase-js": "^2"
   }
 }

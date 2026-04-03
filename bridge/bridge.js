@@ -1,5 +1,6 @@
 const { createClient } = require("@supabase/supabase-js");
-const { exec } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -8,151 +9,263 @@ const SUPABASE_KEY =
   process.env.SUPABASE_KEY ||
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtuYmlqc25naGpjYW9jd3RqdnZ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxMjM3MzgsImV4cCI6MjA5MDY5OTczOH0.k7wem_YuGJ9wHavFBbg00W-d1S9Q0eXmCWdtPWMIFZs";
 
-const CLAUDE_PATH = "/Users/raghunandanmali/.local/bin/claude";
+// Obsidian vault path (the folder has a trailing space in the name)
+const OBSIDIAN_PATH =
+  process.env.OBSIDIAN_PATH ||
+  "/Users/raghunandanmali/Desktop/OBSIDIAN/AI_CHATBOT ";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-let isProcessing = false;
-const messageQueue = [];
-
-async function setOnline(online) {
-  await supabase
-    .from("bridge_status")
-    .update({ is_online: online, last_heartbeat: new Date().toISOString() })
-    .eq("id", 1);
-  console.log(`Bridge status: ${online ? "ONLINE" : "OFFLINE"}`);
-}
-
-async function sendHeartbeat() {
-  await supabase
-    .from("bridge_status")
-    .update({ last_heartbeat: new Date().toISOString(), is_online: true })
-    .eq("id", 1);
-}
-
-function callClaude(message, model) {
-  return new Promise((resolve, reject) => {
-    // Escape single quotes in the message for shell safety
-    const escaped = message.replace(/'/g, "'\\''");
-    const modelFlag = model ? `--model ${model}` : "";
-    const cmd = `${CLAUDE_PATH} -p ${modelFlag} '${escaped}'`;
-
-    exec(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(stderr || err.message));
-      } else {
-        resolve(stdout.trim());
-      }
-    });
+function formatDate(dateStr) {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
   });
 }
 
-async function processMessage(message) {
-  console.log(
-    `Processing [${message.model}]: "${message.content.substring(0, 50)}..."`
-  );
-
-  try {
-    const response = await callClaude(message.content, message.model);
-
-    await supabase.from("messages").insert({
-      session_id: message.session_id,
-      role: "assistant",
-      content: response,
-      status: "complete",
-      model: message.model,
-    });
-
-    await supabase
-      .from("messages")
-      .update({ status: "complete" })
-      .eq("id", message.id);
-
-    console.log(`Response sent (${response.length} chars)`);
-  } catch (err) {
-    console.error("Claude error:", err.message);
-
-    await supabase.from("messages").insert({
-      session_id: message.session_id,
-      role: "assistant",
-      content: "Sorry, I encountered an error. Please try again.",
-      status: "error",
-    });
-  }
+function formatTime(dateStr) {
+  const d = new Date(dateStr);
+  return d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
-async function processQueue() {
-  if (isProcessing || messageQueue.length === 0) return;
-
-  isProcessing = true;
-  const msg = messageQueue.shift();
-  await processMessage(msg);
-  isProcessing = false;
-
-  processQueue();
+function categoryEmoji(cat) {
+  const map = {
+    task: "✅",
+    thought: "💭",
+    idea: "💡",
+    meeting: "📅",
+    reminder: "🔔",
+  };
+  return map[cat] || "📝";
 }
 
-async function start() {
-  console.log("Starting bridge...");
-  console.log(`Using Claude CLI at: ${CLAUDE_PATH}`);
+function statusTag(status) {
+  if (!status) return "";
+  const map = { todo: "🔲 To Do", in_progress: "🔄 In Progress", done: "✅ Done" };
+  return ` [${map[status] || status}]`;
+}
 
-  await setOnline(true);
+async function syncToObsidian() {
+  console.log("Syncing unsynced entries to Obsidian...");
 
-  const heartbeatInterval = setInterval(sendHeartbeat, 30000);
-
-  // Pick up any pending messages from before bridge started
-  const { data: pending } = await supabase
-    .from("messages")
+  const { data: entries, error } = await supabase
+    .from("entries")
     .select("*")
-    .eq("role", "user")
-    .eq("status", "pending")
+    .eq("synced_to_obsidian", false)
     .order("created_at", { ascending: true });
 
-  if (pending && pending.length > 0) {
-    console.log(`Found ${pending.length} pending messages`);
-    messageQueue.push(...pending);
-    processQueue();
+  if (error) {
+    console.error("Error fetching entries:", error.message);
+    return;
   }
 
-  // Listen for new user messages
+  if (!entries || entries.length === 0) {
+    console.log("No new entries to sync.");
+    return;
+  }
+
+  console.log(`Found ${entries.length} entries to sync.`);
+
+  // Group entries by date
+  const byDate = {};
+  for (const entry of entries) {
+    const dateKey = new Date(entry.created_at).toISOString().split("T")[0];
+    if (!byDate[dateKey]) byDate[dateKey] = [];
+    byDate[dateKey].push(entry);
+  }
+
+  // Write/append to daily files
+  for (const [dateKey, dayEntries] of Object.entries(byDate)) {
+    const filePath = path.join(OBSIDIAN_PATH, `${dateKey}.md`);
+    const dateLabel = formatDate(dayEntries[0].created_at);
+
+    let content = "";
+
+    // If file doesn't exist, add header
+    if (!fs.existsSync(filePath)) {
+      content += `# Memory — ${dateLabel}\n\n`;
+    }
+
+    for (const entry of dayEntries) {
+      const time = formatTime(entry.created_at);
+      const emoji = categoryEmoji(entry.category);
+      const status = statusTag(entry.status);
+
+      content += `## ${emoji} ${entry.category.charAt(0).toUpperCase() + entry.category.slice(1)}${status}\n`;
+      content += `*${time}*\n\n`;
+      content += `${entry.content}\n\n---\n\n`;
+    }
+
+    fs.appendFileSync(filePath, content, "utf-8");
+    console.log(`  Written ${dayEntries.length} entries to ${dateKey}.md`);
+  }
+
+  // Mark as synced
+  const ids = entries.map((e) => e.id);
+  await supabase
+    .from("entries")
+    .update({ synced_to_obsidian: true })
+    .in("id", ids);
+
+  console.log(`Synced ${entries.length} entries to Obsidian.`);
+}
+
+async function printSummary() {
+  console.log("\n--- MEMORY SUMMARY ---\n");
+
+  // Tasks
+  const { data: tasks } = await supabase
+    .from("entries")
+    .select("*")
+    .eq("category", "task")
+    .in("status", ["todo", "in_progress"])
+    .order("created_at", { ascending: false });
+
+  if (tasks && tasks.length > 0) {
+    console.log(`📋 OPEN TASKS (${tasks.length}):`);
+    for (const t of tasks) {
+      const icon = t.status === "in_progress" ? "🔄" : "🔲";
+      console.log(`  ${icon} ${t.content}`);
+    }
+    console.log();
+  }
+
+  // Today's entries
+  const today = new Date().toISOString().split("T")[0];
+  const { data: todayEntries } = await supabase
+    .from("entries")
+    .select("*")
+    .gte("created_at", today)
+    .order("created_at", { ascending: true });
+
+  if (todayEntries && todayEntries.length > 0) {
+    console.log(`📅 TODAY'S ENTRIES (${todayEntries.length}):`);
+    for (const e of todayEntries) {
+      const time = formatTime(e.created_at);
+      const emoji = categoryEmoji(e.category);
+      console.log(`  ${emoji} [${time}] ${e.content.substring(0, 80)}${e.content.length > 80 ? "..." : ""}`);
+    }
+    console.log();
+  }
+
+  // Reminders
+  const { data: reminders } = await supabase
+    .from("entries")
+    .select("*")
+    .eq("category", "reminder")
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  if (reminders && reminders.length > 0) {
+    console.log(`🔔 RECENT REMINDERS:`);
+    for (const r of reminders) {
+      const time = formatTime(r.created_at);
+      console.log(`  [${time}] ${r.content}`);
+    }
+    console.log();
+  }
+
+  // Stats
+  const { data: allEntries } = await supabase
+    .from("entries")
+    .select("category")
+
+  if (allEntries) {
+    const counts = {};
+    for (const e of allEntries) {
+      counts[e.category] = (counts[e.category] || 0) + 1;
+    }
+    console.log("📊 TOTAL ENTRIES:", allEntries.length);
+    for (const [cat, count] of Object.entries(counts)) {
+      console.log(`  ${categoryEmoji(cat)} ${cat}: ${count}`);
+    }
+  }
+
+  console.log("\n--- END SUMMARY ---\n");
+}
+
+async function startWatcher() {
+  // Subscribe to new entries for live sync
   const channel = supabase
-    .channel("new-messages")
+    .channel("obsidian-sync")
     .on(
       "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: "messages",
-        filter: "role=eq.user",
-      },
-      (payload) => {
-        const msg = payload.new;
-        if (msg.status === "pending") {
-          console.log(`New message from session ${msg.session_id}`);
-          messageQueue.push(msg);
-          processQueue();
+      { event: "INSERT", schema: "public", table: "entries" },
+      async (payload) => {
+        const entry = payload.new;
+        console.log(`\nNew ${entry.category}: "${entry.content.substring(0, 50)}..."`);
+
+        // Sync immediately
+        const dateKey = new Date(entry.created_at).toISOString().split("T")[0];
+        const filePath = path.join(OBSIDIAN_PATH, `${dateKey}.md`);
+        const dateLabel = formatDate(entry.created_at);
+        const time = formatTime(entry.created_at);
+        const emoji = categoryEmoji(entry.category);
+        const status = statusTag(entry.status);
+
+        let content = "";
+        if (!fs.existsSync(filePath)) {
+          content += `# Memory — ${dateLabel}\n\n`;
         }
+
+        content += `## ${emoji} ${entry.category.charAt(0).toUpperCase() + entry.category.slice(1)}${status}\n`;
+        content += `*${time}*\n\n`;
+        content += `${entry.content}\n\n---\n\n`;
+
+        fs.appendFileSync(filePath, content, "utf-8");
+
+        await supabase
+          .from("entries")
+          .update({ synced_to_obsidian: true })
+          .eq("id", entry.id);
+
+        console.log(`  → Synced to Obsidian (${dateKey}.md)`);
       }
     )
     .subscribe();
 
-  console.log("Bridge is running. Waiting for messages...");
+  console.log("Watching for new entries (live sync to Obsidian)...");
   console.log("Press Ctrl+C to stop.\n");
 
-  const shutdown = async () => {
-    console.log("\nShutting down...");
-    clearInterval(heartbeatInterval);
+  process.on("SIGINT", () => {
+    console.log("\nStopping watcher...");
     supabase.removeChannel(channel);
-    await setOnline(false);
-    console.log("Bridge offline. Goodbye!");
     process.exit(0);
-  };
+  });
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGTERM", () => {
+    supabase.removeChannel(channel);
+    process.exit(0);
+  });
 }
 
-start().catch((err) => {
-  console.error("Failed to start bridge:", err);
+async function main() {
+  console.log("🧠 Memory Bridge\n");
+
+  // Ensure Obsidian folder exists
+  if (!fs.existsSync(OBSIDIAN_PATH)) {
+    fs.mkdirSync(OBSIDIAN_PATH, { recursive: true });
+    console.log(`Created Obsidian folder: ${OBSIDIAN_PATH}`);
+  }
+
+  // Sync any unsynced entries
+  await syncToObsidian();
+
+  // Print summary
+  await printSummary();
+
+  // Start live watcher
+  await startWatcher();
+}
+
+main().catch((err) => {
+  console.error("Failed to start:", err);
   process.exit(1);
 });
