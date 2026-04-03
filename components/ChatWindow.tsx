@@ -14,6 +14,12 @@ type Message = {
   created_at: string;
 };
 
+const MODELS = [
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { id: "claude-opus-4-6", label: "Opus 4.6" },
+];
+
 function generateSessionId() {
   return crypto.randomUUID();
 }
@@ -22,6 +28,7 @@ export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [model, setModel] = useState(MODELS[0].id);
   const [sessionId] = useState(() => generateSessionId());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -113,6 +120,7 @@ export default function ChatWindow() {
           role: "user",
           content: trimmed,
           status: "pending",
+          model: model,
         })
         .select()
         .single();
@@ -125,7 +133,7 @@ export default function ChatWindow() {
 
       inputRef.current?.focus();
     },
-    [sending, sessionId]
+    [sending, sessionId, model]
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -168,6 +176,21 @@ export default function ChatWindow() {
       </div>
 
       <div className="border-t border-[var(--border)] px-4 py-3">
+        <div className="flex items-center gap-2 mb-2">
+          <label className="text-xs text-[var(--text-secondary)]">Model:</label>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            disabled={sending}
+            className="bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-xs px-2 py-1 rounded-lg border border-[var(--border)] focus:outline-none focus:border-[var(--accent)] disabled:opacity-40"
+          >
+            {MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <form onSubmit={handleSubmit} className="flex items-center gap-2">
           <VoiceInput onTranscript={handleVoiceTranscript} disabled={sending} />
           <input

@@ -1,5 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
-const { spawn } = require("child_process");
+const Anthropic = require("@anthropic-ai/sdk");
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -9,6 +9,7 @@ const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtuYmlqc25naGpjYW9jd3RqdnZ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUxMjM3MzgsImV4cCI6MjA5MDY5OTczOH0.k7wem_YuGJ9wHavFBbg00W-d1S9Q0eXmCWdtPWMIFZs";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const anthropic = new Anthropic();
 
 let isProcessing = false;
 const messageQueue = [];
@@ -28,51 +29,31 @@ async function sendHeartbeat() {
     .eq("id", 1);
 }
 
-function callClaude(message) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("claude", ["-p", message], {
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(stderr || `Claude exited with code ${code}`));
-      }
-    });
-
-    proc.on("error", (err) => {
-      reject(err);
-    });
+async function callClaude(message, model) {
+  const response = await anthropic.messages.create({
+    model: model || "claude-haiku-4-5-20251001",
+    max_tokens: 4096,
+    system: "You are a helpful, friendly personal assistant. Be concise and conversational.",
+    messages: [{ role: "user", content: message }],
   });
+
+  return response.content[0].text;
 }
 
 async function processMessage(message) {
   console.log(
-    `Processing message: "${message.content.substring(0, 50)}..."`
+    `Processing [${message.model}]: "${message.content.substring(0, 50)}..."`
   );
 
   try {
-    const response = await callClaude(message.content);
+    const response = await callClaude(message.content, message.model);
 
     await supabase.from("messages").insert({
       session_id: message.session_id,
       role: "assistant",
       content: response,
       status: "complete",
+      model: message.model,
     });
 
     await supabase
@@ -106,6 +87,13 @@ async function processQueue() {
 
 async function start() {
   console.log("Starting bridge...");
+
+  // Verify API key is available
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error("ERROR: ANTHROPIC_API_KEY environment variable is not set.");
+    console.error("Set it with: export ANTHROPIC_API_KEY=your-key-here");
+    process.exit(1);
+  }
 
   await setOnline(true);
 
